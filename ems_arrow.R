@@ -3,6 +3,9 @@
 library(arrow)
 library(dplyr)
 library(tictoc)
+library(readxl)
+library(stringr)
+library(ggplot2)
 
 ### Convert single large file to parquet files
 
@@ -122,4 +125,112 @@ ems_nyc_parquet |>
   group_by(INCIDENT_DISPOSITION_CODE) |> 
   count(sort = T) |> 
   collect()
+
+### Import metadata 
+incident_codes_raw <- readxl::read_xlsx(
+  "data/EMS_incident_dispatch_data_description.xlsx",
+  sheet = 2
+)
+colnames(incident_codes_raw) <- paste(
+  "incident", c("code", "description"),
+  sep = "_"
+)
+
+call_types_raw <- readxl::read_xlsx(
+  "data/EMS_incident_dispatch_data_description.xlsx",
+  sheet = 3
+)
+colnames(call_types_raw) <- paste(
+  "call", c("code", "description"),
+  sep = "_"
+)
+
+
+# Convert to arrow 
+
+incident_codes_arrow <- arrow_table(incident_codes_raw)
+call_types_arrow <- arrow_table(call_types_raw)
+glimpse(ems_nyc_parquet)
+# $ INCIDENT_DISPOSITION_CODE  <string>
+# $ FINAL_CALL_TYPE            <string> 
+
+
+# try not to collect as this will be 22M+ rows
+# instead, join code descriptions with summary tables
+tic()
+# ems_nyc_join <- ems_nyc_parquet |> 
+#   left_join(incident_codes_arrow,
+#             by = c("INCIDENT_DISPOSITION_CODE" = "incident_code")) |> 
+#   left_join(call_types_arrow,
+#             by = c("FINAL_CALL_TYPE" = "call_code")) |> 
+#   collect()
+toc()
+# 58.86 sec elapsed
+
+
+### Top 5 incident codes per borough
+
+borough_incidents <- ems_nyc_parquet |> 
+  group_by(BOROUGH, INCIDENT_DISPOSITION_CODE) |> 
+  count() |> 
+  collect()
+
+borough_incidents_top5 <- borough_incidents |> 
+  left_join(incident_codes_raw,
+            by = c("INCIDENT_DISPOSITION_CODE" = "incident_code")) |> 
+  arrange(BOROUGH, desc(n)) |> 
+  group_by(BOROUGH) |> 
+  slice(1:5) |>
+  mutate(delete = 1) |> 
+  mutate(rank = cumsum(delete),
+         incident_description = 
+           stringr::str_to_title(incident_description)) |> 
+  select(borough = BOROUGH, 
+         rank, 
+         incident_code = INCIDENT_DISPOSITION_CODE,
+         incident_description, 
+         calls = n)
+
+# this would be better shown in DT with colored bars for num calls
+# and probably drop UNKNOWN
+borough_incidents_top5 |> 
+  ggplot(aes(x = incident_description, y = calls)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ borough, ncol = 2) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  coord_flip() +
+  theme_light() 
+
+### Top 5 call types per borough
+
+borough_call_types <- ems_nyc_parquet |> 
+  group_by(BOROUGH, FINAL_CALL_TYPE) |> 
+  count() |> 
+  collect()
+
+borough_call_types_top5 <- borough_call_types |> 
+  left_join(call_types_raw,
+            by = c("FINAL_CALL_TYPE" = "call_code")) |> 
+  arrange(BOROUGH, desc(n)) |> 
+  group_by(BOROUGH) |> 
+  slice(1:5) |>
+  mutate(delete = 1) |> 
+  mutate(rank = cumsum(delete),
+         call_description = 
+           stringr::str_to_title(call_description)) |> 
+  select(borough = BOROUGH, 
+         rank, 
+         call_code = FINAL_CALL_TYPE,
+         call_description, 
+         calls = n)
+
+# decent starting point 
+# it'd be cool to focus on one borough, and see how top 5 changes per year
+# calculate for each year and COLLECT once. then use quarto to filter this summary tab!
+ggplot(borough_call_types_top5) +
+  geom_bar(aes(x = call_code,
+               y = calls),
+           stat = 'identity') +
+  facet_wrap(~borough) +
+  coord_flip()
 
